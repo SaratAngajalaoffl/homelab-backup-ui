@@ -282,7 +282,7 @@ func jobRuns(jl jobList, source, cronjob string) []Run {
 			Source: source, Name: j.Metadata.Name, Phase: phase, Started: start, Finished: fin,
 			Errors: j.Status.Failed, Schedule: cronjob,
 			Manual:   j.Metadata.Annotations["cronjob.kubernetes.io/instantiate"] == "manual",
-			Location: "manual",
+			Location: jobLocation(j.Metadata.Annotations),
 		})
 	}
 	sortNewest(out)
@@ -497,4 +497,14 @@ func humanDur(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dd%02dh", int(d.Hours()/24), int(d.Hours())%24)
 	}
+}
+
+// jobLocation names the folder a disk run wrote to. Only manual runs write into
+// homelab-backups/manual; a scheduled CronJob run (if the schedule is ever
+// un-suspended) uses the same repo but is labelled by trigger.
+func jobLocation(ann map[string]string) string {
+	if ann["cronjob.kubernetes.io/instantiate"] == "manual" {
+		return "manual"
+	}
+	return "scheduled"
 }

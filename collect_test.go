@@ -23,6 +23,9 @@ func TestJobRunsFiltersByOwnerAndPhase(t *testing.T) {
 	if len(runs) != 2 {
 		t.Fatalf("want 2 backup-local runs, got %d", len(runs))
 	}
+	if runs[0].Location != "manual" || runs[1].Location != "scheduled" {
+		t.Errorf("locations wrong: %q %q", runs[0].Location, runs[1].Location)
+	}
 	if runs[0].Name != "manual-1" || runs[0].Phase != "InProgress" || !runs[0].Manual {
 		t.Errorf("newest should be the manual in-progress run, got %+v", runs[0])
 	}
