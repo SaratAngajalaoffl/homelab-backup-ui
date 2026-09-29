@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="60">
+<title>Backups</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --mute:#667085; --line:#e4e7ec;
+          --ok:#12805c; --warn:#b54708; --bad:#c01048; --unk:#667085; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e1116; --card:#161b22; --ink:#e6edf3; --mute:#8b949e; --line:#2a313a;
+            --ok:#3fb68b; --warn:#e3a008; --bad:#f4718c; --unk:#8b949e; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:15px; margin:32px 0 8px; }
+  .sub { color:var(--mute); font-size:13px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; margin-top:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--unk);
+          border-radius:8px; padding:12px 14px; }
+  .card.ok { border-left-color:var(--ok); } .card.warn { border-left-color:var(--warn); }
+  .card.bad { border-left-color:var(--bad); }
+  .card .t { font-size:12px; color:var(--mute); text-transform:uppercase; letter-spacing:.04em; }
+  .card .b { font-size:22px; font-weight:600; margin:2px 0; }
+  .card.ok .b { color:var(--ok); } .card.warn .b { color:var(--warn); } .card.bad .b { color:var(--bad); }
+  .card .d { font-size:13px; color:var(--mute); }
+  .tablewrap { overflow-x:auto; background:var(--card); border:1px solid var(--line); border-radius:8px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th,td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { font-size:12px; color:var(--mute); font-weight:500; } tr:last-child td { border-bottom:0; }
+  .pill { font-size:12px; padding:1px 8px; border-radius:999px; border:1px solid currentColor; }
+  .Completed,.InProgress { color:var(--ok); } .PartiallyFailed { color:var(--warn); }
+  .Failed,.FailedValidation { color:var(--bad); }
+  .err { background:var(--card); border:1px solid var(--bad); border-radius:8px; padding:8px 12px;
+         color:var(--bad); font-size:13px; margin-top:12px; }
+  code { font-size:13px; }
+</style>
+</head>
+<body><main>
+  <h1>Backups</h1>
+  <div class="sub">Read-only · updated {{ts .Generated}} · refreshes every 60s</div>
+
+  {{range .Errors}}<div class="err">{{.}}</div>{{end}}
+
+  <div class="cards">
+  {{range .Cards}}
+    <div class="card {{.Health}}"><div class="t">{{.Title}}</div><div class="b">{{.Big}}</div><div class="d">{{.Detail}}</div></div>
+  {{end}}
+  </div>
+
+  {{template "runs" (dict "Title" "Cloud backups (Velero)" "Runs" .Cloud "Expires" true)}}
+  {{template "runs" (dict "Title" "Disk backups (restic → munin)" "Runs" .Disk "Expires" false)}}
+
+  <h2>Schedules</h2>
+  <div class="tablewrap"><table>
+    <tr><th>Name</th><th>Cron</th><th>State</th><th>Last backup</th></tr>
+    {{range .Schedules}}<tr><td>{{.Name}}</td><td><code>{{.Cron}}</code></td><td>{{.Phase}}</td><td>{{ts .LastBackup}} ({{ago .LastBackup}})</td></tr>{{end}}
+  </table></div>
+  {{range .BSL}}<div class="sub" style="margin-top:8px">Storage location — {{.}}</div>{{end}}
+</main></body></html>
+{{define "runs"}}
+  <h2>{{.Title}}</h2>
+  <div class="tablewrap"><table>
+    <tr><th>Run</th><th>Result</th><th>Started</th><th>Took</th>{{if .Expires}}<th>Expires</th><th>Items</th>{{end}}<th>Trigger</th><th>Errors</th></tr>
+    {{$exp := .Expires}}
+    {{range .Runs}}<tr>
+      <td>{{.Name}}</td>
+      <td><span class="pill {{.Phase}}">{{.Phase}}</span></td>
+      <td>{{ts .Started}} ({{ago .Started}})</td>
+      <td>{{dur .Duration}}</td>
+      {{if $exp}}<td>{{ts .Expires}}</td><td>{{.Items}}</td>{{end}}
+      <td>{{if .Manual}}manual{{else}}scheduled{{end}}</td>
+      <td>{{if .Errors}}{{.Errors}} err{{end}}{{if .Warnings}} {{.Warnings}} warn{{end}}</td>
+    </tr>{{else}}<tr><td colspan="8">No runs found.</td></tr>{{end}}
+  </table></div>
+{{end}}
