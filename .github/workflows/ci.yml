@@ -6,6 +6,10 @@ on:
     branches: [main]
     tags: ["v*"]
 
+# Least privilege by default; only the image job below is granted packages: write.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
