@@ -3,7 +3,6 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="60">
 <title>Backups</title>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --mute:#667085; --line:#e4e7ec;
@@ -35,11 +34,16 @@
   .err { background:var(--card); border:1px solid var(--bad); border-radius:8px; padding:8px 12px;
          color:var(--bad); font-size:13px; margin-top:12px; }
   code { font-size:13px; }
+  .form .opt { display:flex; gap:10px; align-items:flex-start; margin:8px 0; cursor:pointer; }
+  .form input[type=checkbox] { margin-top:4px; width:16px; height:16px; }
+  .form button { margin-top:14px; padding:8px 18px; border-radius:6px; border:1px solid var(--ok);
+                 background:var(--ok); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  .form .d { color:var(--mute); font-size:13px; }
 </style>
 </head>
 <body><main>
   <h1>Backups</h1>
-  <div class="sub">Read-only · updated {{ts .Generated}} · refreshes every 60s</div>
+  <div class="sub">Updated {{ts .Generated}} · refreshes every 60s</div>
 
   {{range .Errors}}<div class="err">{{.}}</div>{{end}}
 
@@ -48,6 +52,27 @@
     <div class="card {{.Health}}"><div class="t">{{.Title}}</div><div class="b">{{.Big}}</div><div class="d">{{.Detail}}</div></div>
   {{end}}
   </div>
+
+  <h2>Start a manual backup</h2>
+  <form method="post" action="/backups" class="card form" onsubmit="return confirm('Start this backup now?')">
+    <div class="t">What to include</div>
+    {{range .Categories}}
+    <label class="opt"><input type="checkbox" name="category" value="{{.ID}}" {{if .Default}}checked{{end}}>
+      <span><b>{{.Name}}</b><br><span class="d">{{.Description}}</span></span></label>
+    {{end}}
+    <div class="t" style="margin-top:12px">Where to send it</div>
+    <label class="opt"><input type="checkbox" name="target" value="cloud" checked><span><b>S3</b> <span class="d">manual/ folder</span></span></label>
+    <label class="opt"><input type="checkbox" name="target" value="disk" checked><span><b>Munin disk</b> <span class="d">manual/ folder; the drive must be plugged in</span></span></label>
+    <button type="submit">Start backup</button>
+  </form>
+
+  {{if .Requests}}
+  <h2>Recent requests</h2>
+  <div class="tablewrap"><table>
+    <tr><th>Request</th><th>Categories</th><th>Targets</th><th>Status</th><th>Detail</th></tr>
+    {{range .Requests}}<tr><td>{{.Name}}</td><td>{{.Categories}}</td><td>{{.Targets}}</td><td>{{.Phase}}</td><td style="white-space:normal">{{.Message}}</td></tr>{{end}}
+  </table></div>
+  {{end}}
 
   {{template "runs" (dict "Title" "Cloud backups (Velero)" "Runs" .Cloud "Expires" true)}}
   {{template "runs" (dict "Title" "Disk backups (restic → munin)" "Runs" .Disk "Expires" false)}}
@@ -58,11 +83,17 @@
     {{range .Schedules}}<tr><td>{{.Name}}</td><td><code>{{.Cron}}</code></td><td>{{.Phase}}</td><td>{{ts .LastBackup}} ({{ago .LastBackup}})</td></tr>{{end}}
   </table></div>
   {{range .BSL}}<div class="sub" style="margin-top:8px">Storage location — {{.}}</div>{{end}}
-</main></body></html>
+</main>
+<script>
+  // Refresh every 60s, but never while the operator is mid-selection.
+  var touched = false;
+  document.querySelectorAll('form input').forEach(function (i) { i.addEventListener('change', function () { touched = true; }); });
+  setInterval(function () { if (!touched) location.reload(); }, 60000);
+</script></body></html>
 {{define "runs"}}
   <h2>{{.Title}}</h2>
   <div class="tablewrap"><table>
-    <tr><th>Run</th><th>Result</th><th>Started</th><th>Took</th>{{if .Expires}}<th>Expires</th><th>Items</th>{{end}}<th>Trigger</th><th>Errors</th></tr>
+    <tr><th>Run</th><th>Result</th><th>Started</th><th>Took</th>{{if .Expires}}<th>Expires</th><th>Items</th>{{end}}<th>Folder</th><th>Errors</th></tr>
     {{$exp := .Expires}}
     {{range .Runs}}<tr>
       <td>{{.Name}}</td>
@@ -70,7 +101,7 @@
       <td>{{ts .Started}} ({{ago .Started}})</td>
       <td>{{dur .Duration}}</td>
       {{if $exp}}<td>{{ts .Expires}}</td><td>{{.Items}}</td>{{end}}
-      <td>{{if .Manual}}manual{{else}}scheduled{{end}}</td>
+      <td>{{.Location}}</td>
       <td>{{if .Errors}}{{.Errors}} err{{end}}{{if .Warnings}} {{.Warnings}} warn{{end}}</td>
     </tr>{{else}}<tr><td colspan="8">No runs found.</td></tr>{{end}}
   </table></div>

@@ -1,12 +1,25 @@
 # homelab-backup-ui
 
-Read-only dashboard over the homelab's backups: Velero (cloud) backups, restic
-(external disk) runs, the backup watchdog, and Sealed Secrets key age.
+Dashboard over the homelab's backups: Velero (cloud) backups, restic
+(external disk) runs, the backup watchdog, and Sealed Secrets key age — plus a
+form to start a manual backup of selected categories to S3, the Munin disk, or both.
 
 Deployed by the `helm/backup-ui` chart in
 [SaratAngajalaoffl/homelab](https://github.com/SaratAngajalaoffl/homelab). It
-talks to the Kubernetes API with a read-only service account; it has no write
-path and no dependencies beyond the Go standard library.
+has no dependencies beyond the Go standard library.
+
+## Two processes, deliberately
+
+- `backup-ui` (web, internet-facing): read-only RBAC, plus the right to create
+  **request ConfigMaps**. That is its only write.
+- `backup-ui dispatch` (no ingress): polls those ConfigMaps, re-validates them
+  against the category allow-list (`CATEGORIES_FILE`), and creates the Velero
+  `Backup` and/or the restic `Job`. Only this process can create either.
+
+So a compromised web pod cannot craft a `Backup` with exec hooks or a `Job` that
+mounts host paths — it can only ask for allow-listed things. POSTs are also
+checked for same-origin (Basic Auth credentials are sent automatically by
+browsers, so this blocks cross-site form posts).
 
 ## Develop
 

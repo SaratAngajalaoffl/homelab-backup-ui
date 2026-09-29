@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -54,11 +55,32 @@ func newKubeClient() (*kubeClient, error) {
 }
 
 func (k *kubeClient) get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, k.base+path, nil)
+	return k.do(ctx, http.MethodGet, path, "", nil, out)
+}
+
+// do performs one API call. Only the dispatcher's ServiceAccount is granted
+// write verbs; the web process's RBAC would reject a write regardless of what
+// this client attempts.
+func (k *kubeClient) do(ctx context.Context, method, path, contentType string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, k.base+path, body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
+	if in != nil {
+		if contentType == "" {
+			contentType = "application/json"
+		}
+		req.Header.Set("Content-Type", contentType)
+	}
 	if k.tokenFile != "" {
 		tok, err := os.ReadFile(k.tokenFile)
 		if err != nil {
@@ -71,12 +93,15 @@ func (k *kubeClient) get(ctx context.Context, path string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s: %s", path, resp.Status, strings.TrimSpace(string(body)))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(data)))
 	}
-	return json.Unmarshal(body, out)
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(data, out)
 }

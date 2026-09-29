@@ -41,11 +41,26 @@ func main() {
 		StateConfigMap: env("STATE_CONFIGMAP", "secrets-export"),
 		// Weekly schedules: a run older than 8 days means one was missed.
 		CloudMaxAge: envHours("CLOUD_MAX_AGE_HOURS", 192),
-		DiskMaxAge:  envHours("DISK_MAX_AGE_HOURS", 192),
+		// 0 = disk backups are manual-only, so age is never a fault.
+		DiskMaxAge: envHours("DISK_MAX_AGE_HOURS", 0),
+	}
+	cats, err := loadCategories(env("CATEGORIES_FILE", "/etc/backup-ui/categories.json"))
+	if err != nil {
+		log.Fatal(err)
 	}
 	kc, err := newKubeClient()
 	if err != nil {
 		log.Fatal(err)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "dispatch" {
+		runDispatcher(context.Background(), kc, DispatchConfig{
+			Config:         cfg,
+			Categories:     cats,
+			ManualLocation: env("MANUAL_LOCATION", "cloud-manual"),
+			ManualTTL:      env("MANUAL_TTL", "720h0m0s"),
+			RequestMaxAge:  7 * 24 * time.Hour,
+		})
+		return
 	}
 	tpl := template.Must(template.New("index.html").Funcs(template.FuncMap{
 		"ago": func(t time.Time) string {
@@ -76,12 +91,38 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(collect(ctx, kc, cfg))
+		json.NewEncoder(w).Encode(collect(ctx, kc, cfg, cats))
+	})
+	mux.HandleFunc("POST /backups", func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			http.Error(w, "cross-site request refused", http.StatusForbidden)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad form", http.StatusBadRequest)
+			return
+		}
+		catIDs, targets := r.Form["category"], r.Form["target"]
+		// Fail fast for a good error message; the dispatcher re-validates.
+		if _, err := resolveRequest(cats, catIDs, targets); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		name, err := createRequest(ctx, kc, cfg.StateNS, catIDs, targets)
+		if err != nil {
+			log.Printf("create request: %v", err)
+			http.Error(w, "could not queue the request", http.StatusBadGateway)
+			return
+		}
+		log.Printf("queued %s categories=%v targets=%v", name, catIDs, targets)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
-		if err := tpl.Execute(w, collect(ctx, kc, cfg)); err != nil {
+		if err := tpl.Execute(w, collect(ctx, kc, cfg, cats)); err != nil {
 			log.Printf("render: %v", err)
 		}
 	})

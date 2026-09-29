@@ -36,6 +36,7 @@ type Run struct {
 	Items    int
 	Schedule string
 	Manual   bool
+	Location string // storage folder: "scheduled" / "manual"
 }
 
 func (r Run) Duration() time.Duration {
@@ -71,6 +72,9 @@ type Status struct {
 	Schedules []Schedule
 	BSL       []string
 	Errors    []string // collector failures, shown rather than hidden
+
+	Categories []Category
+	Requests   []RequestView
 }
 
 type Config struct {
@@ -99,7 +103,10 @@ type meta struct {
 type veleroBackupList struct {
 	Items []struct {
 		Metadata meta `json:"metadata"`
-		Status   struct {
+		Spec     struct {
+			StorageLocation string `json:"storageLocation"`
+		} `json:"spec"`
+		Status struct {
 			Phase               string    `json:"phase"`
 			StartTimestamp      time.Time `json:"startTimestamp"`
 			CompletionTimestamp time.Time `json:"completionTimestamp"`
@@ -159,8 +166,8 @@ type jobList struct {
 	} `json:"items"`
 }
 
-func collect(ctx context.Context, k *kubeClient, cfg Config) Status {
-	st := Status{Generated: time.Now()}
+func collect(ctx context.Context, k *kubeClient, cfg Config, cats []Category) Status {
+	st := Status{Generated: time.Now(), Categories: cats}
 	fail := func(what string, err error) { st.Errors = append(st.Errors, fmt.Sprintf("%s: %v", what, err)) }
 
 	var bl veleroBackupList
@@ -192,8 +199,22 @@ func collect(ctx context.Context, k *kubeClient, cfg Config) Status {
 	st.Disk = jobRuns(jl, "disk", cfg.LocalCronJob)
 	st.Watchdog = jobRuns(jl, "watchdog", cfg.WatchdogCron)
 
+	reqs, err := listRequests(ctx, k, cfg.StateNS)
+	if err != nil {
+		fail("backup requests", err)
+	}
+	st.Requests = reqs
+
+	// The freshness card watches the SCHEDULED backups only: a manual backup
+	// is not expected on any cadence and must not mask a missed weekly run.
+	var scheduled []Run
+	for _, r := range st.Cloud {
+		if !r.Manual {
+			scheduled = append(scheduled, r)
+		}
+	}
 	st.Cards = append(st.Cards,
-		cloudCard(st.Cloud, st.BSL, cfg.CloudMaxAge),
+		cloudCard(scheduled, st.BSL, cfg.CloudMaxAge),
 		diskCard(st.Disk, cfg.DiskMaxAge),
 		watchdogCard(st.Watchdog),
 		keyCard(ctx, k, cfg, fail),
@@ -213,7 +234,8 @@ func veleroRuns(bl veleroBackupList) []Run {
 			Started: b.Status.StartTimestamp, Finished: b.Status.CompletionTimestamp,
 			Expires: b.Status.Expiration, Errors: b.Status.Errors, Warnings: b.Status.Warnings,
 			Items: b.Status.Progress.ItemsBackedUp, Schedule: b.Metadata.Labels["velero.io/schedule-name"],
-			Manual: b.Metadata.Labels["velero.io/schedule-name"] == "",
+			Manual:   b.Metadata.Labels["velero.io/schedule-name"] == "",
+			Location: strings.TrimPrefix(b.Spec.StorageLocation, "cloud-"),
 		})
 	}
 	sortNewest(out)
@@ -259,7 +281,8 @@ func jobRuns(jl jobList, source, cronjob string) []Run {
 		out = append(out, Run{
 			Source: source, Name: j.Metadata.Name, Phase: phase, Started: start, Finished: fin,
 			Errors: j.Status.Failed, Schedule: cronjob,
-			Manual: j.Metadata.Annotations["cronjob.kubernetes.io/instantiate"] == "manual",
+			Manual:   j.Metadata.Annotations["cronjob.kubernetes.io/instantiate"] == "manual",
+			Location: "manual",
 		})
 	}
 	sortNewest(out)
@@ -324,7 +347,7 @@ func cloudCard(runs []Run, bsl []string, maxAge time.Duration) Card {
 func diskCard(runs []Run, maxAge time.Duration) Card {
 	c := Card{Title: "Disk backup (restic → munin)"}
 	if len(runs) == 0 {
-		c.Health, c.Big, c.Detail = HealthWarn, "no runs", "No backup-local Jobs exist (history is capped, so old runs age out)."
+		c.Health, c.Big, c.Detail = HealthUnknown, "no backups yet", "Disk backups are manual-only. Use the form below to start one."
 		return c
 	}
 	newest := runs[0]
@@ -335,7 +358,8 @@ func diskCard(runs []Run, maxAge time.Duration) Card {
 		age := time.Since(good.Finished)
 		c.Big = humanAgo(age)
 		c.Health = HealthOK
-		if age > maxAge {
+		// maxAge == 0 means "manual-only": nothing is due, so age is not a fault.
+		if maxAge > 0 && age > maxAge {
 			c.Health = HealthBad
 		}
 		c.Detail = "last success: " + good.Name
