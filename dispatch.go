@@ -17,6 +17,13 @@ type DispatchConfig struct {
 	ManualLocation string // Velero BackupStorageLocation for manual backups
 	ManualTTL      string // Velero backup TTL, e.g. "720h0m0s"
 	RequestMaxAge  time.Duration
+
+	// Restore.
+	ArgoNS      string // namespace of the ArgoCD Applications
+	HelperImage string // image for the throwaway pod that binds a new volume
+	KopiaImage  string // image with the kopia CLI, for restoring Velero fs-backups
+	CredSecret  string // Secret (in the Velero namespace) holding the BSL's AWS credential
+	RepoSecret  string // Secret holding Velero's Kopia repository password (optional)
 }
 
 // runDispatcher polls request ConfigMaps and turns valid ones into a Velero
@@ -29,7 +36,7 @@ func runDispatcher(ctx context.Context, k *kubeClient, dc DispatchConfig) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
-		if err := dispatchOnce(ctx, k, dc); err != nil {
+		if err := dispatchAll(ctx, k, dc); err != nil {
 			log.Printf("dispatch: %v", err)
 		}
 		select {
@@ -66,6 +73,21 @@ func dispatchOnce(ctx context.Context, k *kubeClient, dc DispatchConfig) error {
 			return err
 		}
 		log.Printf("request %s: %s: %s", name, phase, msg)
+	}
+	return nil
+}
+
+// dispatchAll is one poll: backup requests, then restore actions and progress.
+// Each part runs even if an earlier one failed.
+func dispatchAll(ctx context.Context, k *kubeClient, dc DispatchConfig) error {
+	var errs []string
+	for _, step := range []func(context.Context, *kubeClient, DispatchConfig) error{dispatchOnce, processRestoreActions, reconcileRestores} {
+		if err := step(ctx, k, dc); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
 	return nil
 }

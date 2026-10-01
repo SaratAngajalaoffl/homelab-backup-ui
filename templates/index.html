@@ -39,6 +39,14 @@
   .form button { margin-top:14px; padding:8px 18px; border-radius:6px; border:1px solid var(--ok);
                  background:var(--ok); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
   .form .d { color:var(--mute); font-size:13px; }
+  .form select { margin-top:6px; padding:6px 8px; border-radius:6px; border:1px solid var(--line);
+                 background:var(--bg); color:var(--ink); font:inherit; max-width:100%; }
+  .Active,.Restoring,.Binding,.Validating,.Queued { color:var(--ok); } .Finalized,.Discarded { color:var(--mute); }
+  .Rejected { color:var(--bad); }
+  td form { display:inline; margin:0 4px 0 0; }
+  .btn { padding:3px 10px; border-radius:6px; border:1px solid var(--line); background:var(--card);
+         color:var(--ink); font:inherit; font-size:13px; cursor:pointer; }
+  .btn.danger { border-color:var(--bad); color:var(--bad); }
 </style>
 </head>
 <body><main>
@@ -66,6 +74,50 @@
     <button type="submit">Start backup</button>
   </form>
 
+  {{if .CanRestore}}
+  <h2 id="restores">Restore a volume</h2>
+  <form method="post" action="/restores" class="card form" id="restore-form"
+        onsubmit="return confirm('Restore this volume into a NEW volume and point its app at it? The current volume is kept as an orphan until you delete it.')">
+    <div class="t">1 · Backup to restore from</div>
+    {{range .Sources}}
+    <label class="opt"><input type="radio" name="backup" value="{{.Source}}/{{.Name}}" data-ns="{{range .Namespaces}}{{.}} {{end}}" required>
+      <span><b>{{.Name}}</b> <span class="d">{{if eq .Source "cloud"}}S3{{else}}Munin disk{{end}} · {{ts .Started}} ({{ago .Started}}){{if .Partial}} · partially failed{{end}}</span></span></label>
+    {{else}}<div class="d">No active backups to restore from.</div>{{end}}
+    <div class="t" style="margin-top:12px">2 · Volume to restore</div>
+    <select name="volume" required>
+      <option value="">Pick a backup first…</option>
+      {{range .Volumes}}{{if ne .State "orphaned"}}<option value="{{.Namespace}}/{{.Name}}" data-ns="{{.Namespace}}" hidden disabled>{{.Namespace}} / {{.Name}} ({{.Size}}, {{.StorageClass}})</option>{{end}}{{end}}
+    </select>
+    <div class="t" style="margin-top:12px">3 · Disk for the new volume</div>
+    {{range $i, $d := .Disks}}
+    <label class="opt"><input type="radio" name="disk" value="{{$d.ID}}" {{if eq $i 0}}checked{{end}}>
+      <span><b>{{$d.Name}}</b> <span class="d">storage class <code>{{$d.StorageClass}}</code></span></span></label>
+    {{end}}
+    <div class="d" style="margin-top:8px">A new volume is created on that disk and filled from the backup, the app is pointed at it, and the current volume is kept as an orphan so you can verify the result and roll back. Postgres/Mongo data volumes (StatefulSets) are not restorable here; restore those from their dump volume.</div>
+    <button type="submit">Restore to a new volume</button>
+  </form>
+
+  {{if .Restores}}
+  <h2>Restores</h2>
+  <div class="tablewrap"><table>
+    <tr><th>Restore</th><th>Backup</th><th>Volume</th><th>Disk</th><th>Status</th><th>Detail</th><th>Actions</th></tr>
+    {{range .Restores}}<tr>
+      <td>{{.Name}}</td><td>{{.Backup}}</td><td>{{.Namespace}} / {{.Claim}}</td><td>{{.Disk}}</td>
+      <td><span class="pill {{.Phase}}">{{.Phase}}</span></td>
+      <td style="white-space:normal">{{.Message}}
+        {{if .Active}}<div class="d sub">in use: <code>{{.Active}}</code>{{if .Orphan}} · orphaned: <code>{{.Orphan}}</code>{{end}}</div>{{end}}
+        {{if .ArgoPaused}}<div class="d sub">ArgoCD auto-sync paused for {{.ArgoApps}}</div>{{end}}</td>
+      <td>
+        {{if .CanSwitch}}<form method="post" action="/restores/{{.Name}}/switch" onsubmit="return confirm('Repoint the app now? Changes written to the current volume since the restore stay on that volume.')"><button class="btn">{{.SwitchLabel}}</button></form>{{end}}
+        {{if .CanDeleteOrphan}}<form method="post" action="/restores/{{.Name}}/delete-orphan" onsubmit="return confirm('Permanently delete the orphaned volume and its data? This cannot be undone and removes the ability to roll back.')"><button class="btn danger">Delete {{.Orphan}}</button></form>{{end}}
+        {{if .CanResume}}<form method="post" action="/restores/{{.Name}}/resume-sync" onsubmit="return confirm('Resume ArgoCD auto-sync? Only do this after the chart uses the restored volume, otherwise ArgoCD will point the app back at the old one.')"><button class="btn">Resume ArgoCD sync</button></form>{{end}}
+        {{if .CanDiscard}}<form method="post" action="/restores/{{.Name}}/discard" onsubmit="return confirm('Delete the unfinished new volume?')"><button class="btn danger">Discard new volume</button></form>{{end}}
+      </td>
+    </tr>{{end}}
+  </table></div>
+  {{end}}
+  {{end}}
+
   {{if .Requests}}
   <h2>Recent requests</h2>
   <div class="tablewrap"><table>
@@ -88,6 +140,21 @@
   // Refresh every 60s, but never while the operator is mid-selection.
   var touched = false;
   document.querySelectorAll('form input').forEach(function (i) { i.addEventListener('change', function () { touched = true; }); });
+  // Restore form: only offer the volumes that live in a namespace the chosen backup covers.
+  (function () {
+    var form = document.getElementById('restore-form'); if (!form) return;
+    var sel = form.querySelector('select[name=volume]');
+    form.querySelectorAll('input[name=backup]').forEach(function (r) {
+      r.addEventListener('change', function () {
+        var ns = r.dataset.ns.trim().split(/\s+/), shown = 0;
+        sel.value = '';
+        sel.querySelectorAll('option[data-ns]').forEach(function (o) {
+          var ok = ns.indexOf(o.dataset.ns) >= 0; o.hidden = !ok; o.disabled = !ok; if (ok) shown++;
+        });
+        sel.options[0].textContent = shown ? 'Select a volume…' : 'This backup covers no volumes';
+      });
+    });
+  })();
   setInterval(function () { if (!touched) location.reload(); }, 60000);
 </script></body></html>
 {{define "runs"}}

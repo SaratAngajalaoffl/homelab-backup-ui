@@ -37,6 +37,8 @@ type Run struct {
 	Schedule string
 	Manual   bool
 	Location string // storage folder: "scheduled" / "manual"
+	// Namespaces the run covered; empty means "everything" (a whole-root run).
+	Namespaces []string
 }
 
 func (r Run) Duration() time.Duration {
@@ -75,6 +77,13 @@ type Status struct {
 
 	Categories []Category
 	Requests   []RequestView
+
+	// Restore flow.
+	Disks      []Disk
+	Sources    []RestoreSource
+	Volumes    []Volume
+	Restores   []RestoreView
+	CanRestore bool
 }
 
 type Config struct {
@@ -87,10 +96,12 @@ type Config struct {
 	StateConfigMap string
 	CloudMaxAge    time.Duration
 	DiskMaxAge     time.Duration
+	Disks          []Disk
 }
 
 type meta struct {
 	Name              string            `json:"name"`
+	UID               string            `json:"uid"`
 	CreationTimestamp time.Time         `json:"creationTimestamp"`
 	Labels            map[string]string `json:"labels"`
 	Annotations       map[string]string `json:"annotations"`
@@ -104,7 +115,8 @@ type veleroBackupList struct {
 	Items []struct {
 		Metadata meta `json:"metadata"`
 		Spec     struct {
-			StorageLocation string `json:"storageLocation"`
+			StorageLocation    string   `json:"storageLocation"`
+			IncludedNamespaces []string `json:"includedNamespaces"`
 		} `json:"spec"`
 		Status struct {
 			Phase               string    `json:"phase"`
@@ -148,10 +160,24 @@ type veleroBSLList struct {
 	} `json:"items"`
 }
 
+type containerSpec struct {
+	Env []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	} `json:"env"`
+}
+
 type jobList struct {
 	Items []struct {
 		Metadata meta `json:"metadata"`
-		Status   struct {
+		Spec     struct {
+			Template struct {
+				Spec struct {
+					Containers []containerSpec `json:"containers"`
+				} `json:"spec"`
+			} `json:"template"`
+		} `json:"spec"`
+		Status struct {
 			StartTime      time.Time `json:"startTime"`
 			CompletionTime time.Time `json:"completionTime"`
 			Active         int       `json:"active"`
@@ -167,7 +193,7 @@ type jobList struct {
 }
 
 func collect(ctx context.Context, k *kubeClient, cfg Config, cats []Category) Status {
-	st := Status{Generated: time.Now(), Categories: cats}
+	st := Status{Generated: time.Now(), Categories: cats, Disks: cfg.Disks, CanRestore: len(cfg.Disks) > 0}
 	fail := func(what string, err error) { st.Errors = append(st.Errors, fmt.Sprintf("%s: %v", what, err)) }
 
 	var bl veleroBackupList
@@ -205,6 +231,16 @@ func collect(ctx context.Context, k *kubeClient, cfg Config, cats []Category) St
 	}
 	st.Requests = reqs
 
+	if st.CanRestore {
+		st.Sources = activeSources(st.Cloud, st.Disk, cats, st.Generated)
+		st.Volumes = listVolumes(ctx, k, sortedNamespaces(cats), fail)
+		rs, err := listRestores(ctx, k, cfg.StateNS)
+		if err != nil {
+			fail("restores", err)
+		}
+		st.Restores = rs
+	}
+
 	// The freshness card watches the SCHEDULED backups only: a manual backup
 	// is not expected on any cadence and must not mask a missed weekly run.
 	var scheduled []Run
@@ -234,8 +270,9 @@ func veleroRuns(bl veleroBackupList) []Run {
 			Started: b.Status.StartTimestamp, Finished: b.Status.CompletionTimestamp,
 			Expires: b.Status.Expiration, Errors: b.Status.Errors, Warnings: b.Status.Warnings,
 			Items: b.Status.Progress.ItemsBackedUp, Schedule: b.Metadata.Labels["velero.io/schedule-name"],
-			Manual:   b.Metadata.Labels["velero.io/schedule-name"] == "",
-			Location: strings.TrimPrefix(b.Spec.StorageLocation, "cloud-"),
+			Manual:     b.Metadata.Labels["velero.io/schedule-name"] == "",
+			Location:   strings.TrimPrefix(b.Spec.StorageLocation, "cloud-"),
+			Namespaces: b.Spec.IncludedNamespaces,
 		})
 	}
 	sortNewest(out)
@@ -281,12 +318,26 @@ func jobRuns(jl jobList, source, cronjob string) []Run {
 		out = append(out, Run{
 			Source: source, Name: j.Metadata.Name, Phase: phase, Started: start, Finished: fin,
 			Errors: j.Status.Failed, Schedule: cronjob,
-			Manual:   j.Metadata.Annotations["cronjob.kubernetes.io/instantiate"] == "manual",
-			Location: jobLocation(j.Metadata.Annotations),
+			Manual:     j.Metadata.Annotations["cronjob.kubernetes.io/instantiate"] == "manual",
+			Location:   jobLocation(j.Metadata.Annotations),
+			Namespaces: jobNamespaces(j.Spec.Template.Spec.Containers),
 		})
 	}
 	sortNewest(out)
 	return out
+}
+
+// jobNamespaces reads the BACKUP_NAMESPACES the dispatcher injected into a
+// manual run; a run without it covered the whole PVC root (nil = everything).
+func jobNamespaces(cs []containerSpec) []string {
+	for _, c := range cs {
+		for _, e := range c.Env {
+			if e.Name == "BACKUP_NAMESPACES" {
+				return splitCSV(e.Value)
+			}
+		}
+	}
+	return nil
 }
 
 func sortNewest(r []Run) {

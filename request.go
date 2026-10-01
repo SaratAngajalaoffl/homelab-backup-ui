@@ -32,14 +32,21 @@ type Category struct {
 	Default     bool     `json:"default"`
 }
 
-func loadCategories(path string) ([]Category, error) {
+func loadJSONFile(path string, out any) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	if err := json.Unmarshal(b, out); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
+}
+
+func loadCategories(path string) ([]Category, error) {
 	var cats []Category
-	if err := json.Unmarshal(b, &cats); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	if err := loadJSONFile(path, &cats); err != nil {
+		return nil, err
 	}
 	return cats, nil
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,10 +17,11 @@ import (
 
 const saDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 
-// kubeClient is a minimal read-only Kubernetes API client. It exists so the
-// service needs no client-go (and no vendored dependency tree) for what is
-// only ever a handful of GETs. It has no write methods on purpose: v1 of this
-// app is a viewer, and its RBAC only grants get/list.
+// kubeClient is a minimal Kubernetes API client. It exists so the service needs
+// no client-go (and no vendored dependency tree) for what is only ever a
+// handful of calls. What it may actually do is decided by RBAC: the web pod's
+// ServiceAccount can read and create request ConfigMaps, and only the
+// dispatcher's can write anything else.
 type kubeClient struct {
 	base string
 	http *http.Client
@@ -52,6 +54,19 @@ func newKubeClient() (*kubeClient, error) {
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}},
 		},
 	}, nil
+}
+
+// apiError is a non-2xx answer from the API server.
+type apiError struct {
+	Code int
+	msg  string
+}
+
+func (e *apiError) Error() string { return e.msg }
+
+func isNotFound(err error) bool {
+	var ae *apiError
+	return errors.As(err, &ae) && ae.Code == http.StatusNotFound
 }
 
 func (k *kubeClient) get(ctx context.Context, path string, out any) error {
@@ -98,7 +113,7 @@ func (k *kubeClient) do(ctx context.Context, method, path, contentType string, i
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(data)))
+		return &apiError{Code: resp.StatusCode, msg: fmt.Sprintf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(data)))}
 	}
 	if out == nil {
 		return nil
