@@ -73,6 +73,16 @@ func (k *kubeClient) get(ctx context.Context, path string, out any) error {
 	return k.do(ctx, http.MethodGet, path, "", nil, out)
 }
 
+// text GETs a non-JSON resource, such as a pod log.
+func (k *kubeClient) text(ctx context.Context, path string) (string, error) {
+	var raw rawBody
+	err := k.do(ctx, http.MethodGet, path, "", nil, &raw)
+	return string(raw), err
+}
+
+// rawBody makes do() hand back the response untouched instead of decoding JSON.
+type rawBody []byte
+
 // do performs one API call. Only the dispatcher's ServiceAccount is granted
 // write verbs; the web process's RBAC would reject a write regardless of what
 // this client attempts.
@@ -89,7 +99,11 @@ func (k *kubeClient) do(ctx context.Context, method, path, contentType string, i
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/json")
+	accept := "application/json"
+	if _, ok := out.(*rawBody); ok {
+		accept = "*/*"
+	}
+	req.Header.Set("Accept", accept)
 	if in != nil {
 		if contentType == "" {
 			contentType = "application/json"
@@ -116,6 +130,10 @@ func (k *kubeClient) do(ctx context.Context, method, path, contentType string, i
 		return &apiError{Code: resp.StatusCode, msg: fmt.Sprintf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(data)))}
 	}
 	if out == nil {
+		return nil
+	}
+	if raw, ok := out.(*rawBody); ok {
+		*raw = data
 		return nil
 	}
 	return json.Unmarshal(data, out)

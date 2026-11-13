@@ -22,6 +22,26 @@ mounts host paths — it can only ask for allow-listed things. POSTs are also
 checked for same-origin (Basic Auth credentials are sent automatically by
 browsers, so this blocks cross-site form posts).
 
+## S3 usage and deleting backups
+
+**Usage.** The web pod never holds the bucket credential. Every `USAGE_INTERVAL_HOURS`
+(default 6; `0` = off), or when **Rescan now** is pressed, the dispatcher starts a Job in
+the Velero namespace that runs this same image as `backup-ui s3-usage` (`SELF_IMAGE`) with
+the default BSL's credential mounted. It lists everything under the BSL prefix's top-level
+folder (`USAGE_SCAN_PREFIX` overrides; e.g. `automatic/`) with a stdlib SigV4 client, and
+prints one report line; the dispatcher copies it from the pod log into the `s3-usage`
+ConfigMap. The page sizes each Velero location by folder (each namespace's Kopia repository,
+each backup's metadata), lists **everything else under that prefix that Velero does not own**
+(typically stale data), flags backup folders with no Backup object, and counts unfinished
+multipart uploads. Per-backup S3 size is not shown because it does not exist: Kopia
+deduplicates across backups, so the table shows each backup's volume data before dedup.
+
+**Delete.** Each finished S3 backup has a Delete button. The dispatcher refuses running
+backups, ones an in-flight restore is reading, the only Completed scheduled backup, and the
+only Completed backup overall; otherwise it creates a Velero `DeleteBackupRequest` (what
+`velero backup delete` does). Data shared with other backups stays; the rest is freed by
+Kopia maintenance. Disk (restic) runs have no Delete — restic keeps the last 3 per tag set.
+
 ## Restoring a volume
 
 With a disk list configured (`DISKS_FILE`, see below), the dashboard can restore **one

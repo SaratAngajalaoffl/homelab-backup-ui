@@ -22,16 +22,18 @@ import (
 type fakeCluster struct {
 	mu   sync.Mutex
 	objs map[string]map[string]any
+	logs map[string]string // pod log path -> text
 	seq  int
 }
 
 var collections = map[string]bool{
 	"backups": true, "jobs": true, "configmaps": true, "persistentvolumeclaims": true, "deployments": true,
 	"statefulsets": true, "pods": true, "applications": true, "podvolumebackups": true, "cronjobs": true,
+	"deletebackuprequests": true, "backupstoragelocations": true,
 }
 
 func newFakeCluster(t *testing.T) (*fakeCluster, *kubeClient) {
-	c := &fakeCluster{objs: map[string]map[string]any{}}
+	c := &fakeCluster{objs: map[string]map[string]any{}, logs: map[string]string{}}
 	srv := httptest.NewServer(http.HandlerFunc(c.serve))
 	t.Cleanup(srv.Close)
 	return c, &kubeClient{base: srv.URL, http: srv.Client()}
@@ -127,6 +129,10 @@ func (c *fakeCluster) serve(w http.ResponseWriter, r *http.Request) {
 	reply := func(v any) { json.NewEncoder(w).Encode(v) }
 	switch r.Method {
 	case http.MethodGet:
+		if l, ok := c.logs[path]; ok {
+			io.WriteString(w, l)
+			return
+		}
 		if collections[path[strings.LastIndex(path, "/")+1:]] {
 			sel := r.URL.Query().Get("labelSelector")
 			items := []any{}

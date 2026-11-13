@@ -125,6 +125,7 @@ func sameOrigin(r *http.Request) bool {
 // RequestView is one row of the "requests" table.
 type RequestView struct {
 	Name       string
+	Action     string // "Backup", "Delete <backup>", "Rescan S3 usage"
 	Categories string
 	Targets    string
 	Phase      string
@@ -139,22 +140,32 @@ type configMapList struct {
 	} `json:"items"`
 }
 
+// listRequests shows backup, delete and rescan requests in one table.
 func listRequests(ctx context.Context, k *kubeClient, ns string) ([]RequestView, error) {
-	var l configMapList
-	sel := url.QueryEscape(requestLabel + "=true")
-	if err := k.get(ctx, "/api/v1/namespaces/"+ns+"/configmaps?labelSelector="+sel, &l); err != nil {
-		return nil, err
-	}
 	var out []RequestView
-	for _, it := range l.Items {
-		phase := it.Metadata.Annotations[annPhase]
-		if phase == "" {
-			phase = "Queued"
+	for _, label := range []string{requestLabel, deleteRequestLabel, usageRequestLabel} {
+		var l configMapList
+		sel := url.QueryEscape(label + "=true")
+		if err := k.get(ctx, "/api/v1/namespaces/"+ns+"/configmaps?labelSelector="+sel, &l); err != nil {
+			return nil, err
 		}
-		out = append(out, RequestView{
-			Name: it.Metadata.Name, Categories: it.Data["categories"], Targets: it.Data["targets"],
-			Phase: phase, Message: it.Metadata.Annotations[annMessage], Created: it.Metadata.CreationTimestamp,
-		})
+		for _, it := range l.Items {
+			phase := it.Metadata.Annotations[annPhase]
+			if phase == "" {
+				phase = "Queued"
+			}
+			v := RequestView{
+				Name: it.Metadata.Name, Action: "Backup", Categories: it.Data["categories"], Targets: it.Data["targets"],
+				Phase: phase, Message: it.Metadata.Annotations[annMessage], Created: it.Metadata.CreationTimestamp,
+			}
+			switch label {
+			case deleteRequestLabel:
+				v.Action, v.Targets = "Delete "+it.Data["backup"], "S3"
+			case usageRequestLabel:
+				v.Action, v.Targets = "Rescan S3 usage", "S3"
+			}
+			out = append(out, v)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Created.After(out[j].Created) })
 	if len(out) > 15 {

@@ -45,7 +45,8 @@ func newTemplate() *template.Template {
 			}
 			return t.Local().Format("2006-01-02 15:04")
 		},
-		"dur": humanDur,
+		"dur":   humanDur,
+		"bytes": humanBytes,
 		"dict": func(kv ...any) map[string]any {
 			m := map[string]any{}
 			for i := 0; i+1 < len(kv); i += 2 {
@@ -57,6 +58,11 @@ func newTemplate() *template.Template {
 }
 
 func main() {
+	// The S3 usage Job: needs only the bucket credential, no cluster config.
+	if len(os.Args) > 1 && os.Args[1] == "s3-usage" {
+		runS3Usage()
+		return
+	}
 	cfg := Config{
 		VeleroNS:       env("VELERO_NS", "velero"),
 		LocalNS:        env("LOCAL_NS", "homelab-backup-local"),
@@ -88,16 +94,19 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "dispatch" {
 		runDispatcher(context.Background(), kc, DispatchConfig{
-			Config:         cfg,
-			Categories:     cats,
-			ManualLocation: env("MANUAL_LOCATION", "cloud-manual"),
-			ManualTTL:      env("MANUAL_TTL", "720h0m0s"),
-			RequestMaxAge:  7 * 24 * time.Hour,
-			ArgoNS:         env("ARGOCD_NS", "argocd"),
-			HelperImage:    env("RESTORE_HELPER_IMAGE", "busybox:1.37"),
-			KopiaImage:     env("RESTORE_KOPIA_IMAGE", "kopia/kopia:latest"),
-			CredSecret:     env("RESTORE_CRED_SECRET", "velero-cloud-credentials"),
-			RepoSecret:     env("RESTORE_REPO_SECRET", "velero-repo-credentials"),
+			Config:          cfg,
+			Categories:      cats,
+			ManualLocation:  env("MANUAL_LOCATION", "cloud-manual"),
+			ManualTTL:       env("MANUAL_TTL", "720h0m0s"),
+			RequestMaxAge:   7 * 24 * time.Hour,
+			ArgoNS:          env("ARGOCD_NS", "argocd"),
+			HelperImage:     env("RESTORE_HELPER_IMAGE", "busybox:1.37"),
+			KopiaImage:      env("RESTORE_KOPIA_IMAGE", "kopia/kopia:latest"),
+			CredSecret:      env("RESTORE_CRED_SECRET", "velero-cloud-credentials"),
+			RepoSecret:      env("RESTORE_REPO_SECRET", "velero-repo-credentials"),
+			SelfImage:       os.Getenv("SELF_IMAGE"),
+			UsageInterval:   envHours("USAGE_INTERVAL_HOURS", 6),
+			UsageScanPrefix: os.Getenv("USAGE_SCAN_PREFIX"),
 		})
 		return
 	}
@@ -136,6 +145,41 @@ func main() {
 		}
 		log.Printf("queued %s categories=%v targets=%v", name, catIDs, targets)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
+	})
+	mux.HandleFunc("POST /cloud-backups/{name}/delete", func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			http.Error(w, "cross-site request refused", http.StatusForbidden)
+			return
+		}
+		backup := r.PathValue("name")
+		if !validBackupName(backup) {
+			http.Error(w, "invalid backup name", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		name, err := createDeleteRequest(ctx, kc, cfg.StateNS, backup)
+		if err != nil {
+			log.Printf("create delete request: %v", err)
+			http.Error(w, "could not queue the deletion", http.StatusBadGateway)
+			return
+		}
+		log.Printf("queued %s: delete %s", name, backup)
+		http.Redirect(w, r, "/#requests", http.StatusSeeOther)
+	})
+	mux.HandleFunc("POST /usage/rescan", func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			http.Error(w, "cross-site request refused", http.StatusForbidden)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		if _, err := createUsageRequest(ctx, kc, cfg.StateNS); err != nil {
+			log.Printf("create usage request: %v", err)
+			http.Error(w, "could not queue the scan", http.StatusBadGateway)
+			return
+		}
+		http.Redirect(w, r, "/#usage", http.StatusSeeOther)
 	})
 	mux.HandleFunc("POST /restores", func(w http.ResponseWriter, r *http.Request) {
 		if !sameOrigin(r) {

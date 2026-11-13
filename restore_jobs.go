@@ -189,6 +189,9 @@ type podVolumeBackupList struct {
 		Status struct {
 			Phase      string `json:"phase"`
 			SnapshotID string `json:"snapshotID"`
+			Progress   struct {
+				TotalBytes int64 `json:"totalBytes"`
+			} `json:"progress"`
 		} `json:"status"`
 	} `json:"items"`
 }

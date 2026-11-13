@@ -30,7 +30,8 @@
   th { font-size:12px; color:var(--mute); font-weight:500; } tr:last-child td { border-bottom:0; }
   .pill { font-size:12px; padding:1px 8px; border-radius:999px; border:1px solid currentColor; }
   .Completed,.InProgress { color:var(--ok); } .PartiallyFailed { color:var(--warn); }
-  .Failed,.FailedValidation { color:var(--bad); }
+  .Failed,.FailedValidation { color:var(--bad); } .Deleting { color:var(--mute); }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
   .err { background:var(--card); border:1px solid var(--bad); border-radius:8px; padding:8px 12px;
          color:var(--bad); font-size:13px; margin-top:12px; }
   code { font-size:13px; }
@@ -119,15 +120,43 @@
   {{end}}
 
   {{if .Requests}}
-  <h2>Recent requests</h2>
+  <h2 id="requests">Recent requests</h2>
   <div class="tablewrap"><table>
-    <tr><th>Request</th><th>Categories</th><th>Targets</th><th>Status</th><th>Detail</th></tr>
-    {{range .Requests}}<tr><td>{{.Name}}</td><td>{{.Categories}}</td><td>{{.Targets}}</td><td>{{.Phase}}</td><td style="white-space:normal">{{.Message}}</td></tr>{{end}}
+    <tr><th>Request</th><th>Action</th><th>Categories</th><th>Targets</th><th>Status</th><th>Detail</th></tr>
+    {{range .Requests}}<tr><td>{{.Name}}</td><td>{{.Action}}</td><td>{{.Categories}}</td><td>{{.Targets}}</td><td>{{.Phase}}</td><td style="white-space:normal">{{.Message}}</td></tr>{{end}}
   </table></div>
   {{end}}
 
   {{template "runs" (dict "Title" "Cloud backups (Velero)" "Runs" .Cloud "Expires" true)}}
+  <div class="sub" style="margin-top:6px">Volume data is what each backup read, before Kopia's deduplication — backups of the same namespace share most of it in S3, so deleting one frees only what no other backup holds. Actual bucket usage is below.</div>
   {{template "runs" (dict "Title" "Disk backups (restic → munin)" "Runs" .Disk "Expires" false)}}
+
+  <h2 id="usage">S3 bucket usage</h2>
+  {{with .Usage}}
+  <div class="sub">
+    {{if .Report}}s3://{{.Report.Bucket}}/{{.Report.Prefix}} · {{bytes .Report.Bytes}} in {{.Report.Objects}} objects · scanned {{ts .Report.Scanned}} ({{ago .Report.Scanned}}){{else}}Not scanned yet.{{end}}
+    {{if .Running}} · scan running since {{ago .Started}}{{end}}
+  </div>
+  {{if .Error}}<div class="err">Last scan: {{.Error}}</div>{{end}}
+  {{if not .Running}}<form method="post" action="/usage/rescan" style="margin:8px 0"><button class="btn">Rescan now</button></form>{{end}}
+  {{with .Report}}
+  {{if .Uploads}}<div class="err">{{.Uploads}} unfinished multipart upload(s), oldest {{ts .UploadsOldest}}. Their parts are billed but invisible to a listing — add a lifecycle rule that aborts incomplete uploads.</div>{{end}}
+  {{if .UploadsError}}<div class="sub">Unfinished multipart uploads not checked: {{.UploadsError}}</div>{{end}}
+  {{range .Sections}}
+  <h2 style="margin-top:16px">{{.Title}} <span class="sub">{{if .Prefix}}{{.Prefix}}{{else}}(bucket root){{end}} · {{bytes .Bytes}} · {{.Objects}} objects</span></h2>
+  {{if not .Managed}}<div class="sub" style="margin-bottom:6px">Nothing in Velero's locations: written by another tool, or left over from an earlier setup. Velero never reads or deletes it — check whether it is still needed.</div>{{end}}
+  <div class="tablewrap"><table>
+    <tr><th>What</th><th>Name</th><th class="num">Size</th><th class="num">Objects</th><th>Oldest</th><th>Newest</th></tr>
+    {{range .Groups}}<tr>
+      <td>{{if eq .Kind "backup"}}backup metadata{{else if eq .Kind "kopia"}}volume data (Kopia){{else}}other{{end}}</td>
+      <td>{{.Name}}{{if .Orphan}} <span class="pill Failed" title="Velero has no Backup object with this name">not in Velero</span>{{end}}</td>
+      <td class="num">{{bytes .Bytes}}</td><td class="num">{{.Objects}}</td>
+      <td>{{ts .Oldest}}</td><td>{{ts .Newest}}</td>
+    </tr>{{end}}
+  </table></div>
+  {{end}}
+  {{end}}
+  {{end}}
 
   <h2>Schedules</h2>
   <div class="tablewrap"><table>
@@ -160,16 +189,17 @@
 {{define "runs"}}
   <h2>{{.Title}}</h2>
   <div class="tablewrap"><table>
-    <tr><th>Run</th><th>Result</th><th>Started</th><th>Took</th>{{if .Expires}}<th>Expires</th><th>Items</th>{{end}}<th>Folder</th><th>Errors</th></tr>
+    <tr><th>Run</th><th>Result</th><th>Started</th><th>Took</th>{{if .Expires}}<th>Expires</th><th>Items</th><th class="num">Volume data</th>{{end}}<th>Folder</th><th>Errors</th>{{if .Expires}}<th></th>{{end}}</tr>
     {{$exp := .Expires}}
     {{range .Runs}}<tr>
       <td>{{.Name}}</td>
       <td><span class="pill {{.Phase}}">{{.Phase}}</span></td>
       <td>{{ts .Started}} ({{ago .Started}})</td>
       <td>{{dur .Duration}}</td>
-      {{if $exp}}<td>{{ts .Expires}}</td><td>{{.Items}}</td>{{end}}
+      {{if $exp}}<td>{{ts .Expires}}</td><td>{{.Items}}</td><td class="num">{{if .Bytes}}{{bytes .Bytes}}{{else}}—{{end}}</td>{{end}}
       <td>{{.Location}}</td>
       <td>{{if .Errors}}{{.Errors}} err{{end}}{{if .Warnings}} {{.Warnings}} warn{{end}}</td>
-    </tr>{{else}}<tr><td colspan="8">No runs found.</td></tr>{{end}}
+      {{if $exp}}<td>{{if .Deletable}}<form method="post" action="/cloud-backups/{{.Name}}/delete" onsubmit="return confirm('Permanently delete backup {{.Name}} from S3? This cannot be undone.')"><button class="btn danger">Delete</button></form>{{end}}</td>{{end}}
+    </tr>{{else}}<tr><td colspan="10">No runs found.</td></tr>{{end}}
   </table></div>
 {{end}}

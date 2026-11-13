@@ -37,6 +37,9 @@ type Run struct {
 	Schedule string
 	Manual   bool
 	Location string // storage folder: "scheduled" / "manual"
+	// Volume data the run read (cloud: sum of its PodVolumeBackups). Before
+	// Kopia's dedup, so it is NOT what the run occupies in S3.
+	Bytes int64
 	// Namespaces the run covered; empty means "everything" (a whole-root run).
 	Namespaces []string
 }
@@ -74,6 +77,7 @@ type Status struct {
 	Schedules []Schedule
 	BSL       []string
 	Errors    []string // collector failures, shown rather than hidden
+	Usage     UsageView
 
 	Categories []Category
 	Requests   []RequestView
@@ -201,6 +205,11 @@ func collect(ctx context.Context, k *kubeClient, cfg Config, cats []Category) St
 		fail("velero backups", err)
 	}
 	st.Cloud = veleroRuns(bl)
+	var pl podVolumeBackupList
+	if err := k.get(ctx, "/apis/velero.io/v1/namespaces/"+cfg.VeleroNS+"/podvolumebackups", &pl); err != nil {
+		fail("velero volume backups", err)
+	}
+	addVolumeBytes(st.Cloud, pl)
 
 	var sl veleroScheduleList
 	if err := k.get(ctx, "/apis/velero.io/v1/namespaces/"+cfg.VeleroNS+"/schedules", &sl); err != nil {
@@ -224,6 +233,12 @@ func collect(ctx context.Context, k *kubeClient, cfg Config, cats []Category) St
 	}
 	st.Disk = jobRuns(jl, "disk", cfg.LocalCronJob)
 	st.Watchdog = jobRuns(jl, "watchdog", cfg.WatchdogCron)
+
+	usage, err := loadUsage(ctx, k, cfg.StateNS, st.Cloud)
+	if err != nil {
+		fail("s3 usage", err)
+	}
+	st.Usage = usage
 
 	reqs, err := listRequests(ctx, k, cfg.StateNS)
 	if err != nil {
@@ -253,6 +268,7 @@ func collect(ctx context.Context, k *kubeClient, cfg Config, cats []Category) St
 		cloudCard(scheduled, st.BSL, cfg.CloudMaxAge),
 		diskCard(st.Disk, cfg.DiskMaxAge),
 		watchdogCard(st.Watchdog),
+		usageCard(st.Usage),
 		keyCard(ctx, k, cfg, fail),
 	)
 	return st
@@ -277,6 +293,16 @@ func veleroRuns(bl veleroBackupList) []Run {
 	}
 	sortNewest(out)
 	return out
+}
+
+func addVolumeBytes(runs []Run, pl podVolumeBackupList) {
+	by := map[string]int64{}
+	for _, p := range pl.Items {
+		by[p.Metadata.Labels["velero.io/backup-name"]] += p.Status.Progress.TotalBytes
+	}
+	for i := range runs {
+		runs[i].Bytes = by[runs[i].Name]
+	}
 }
 
 // jobRuns keeps the Jobs owned by one CronJob. Jobs made with
@@ -559,3 +585,7 @@ func jobLocation(ann map[string]string) string {
 	}
 	return "scheduled"
 }
+
+// Deletable says whether the UI offers Delete. The dispatcher re-checks (and
+// also refuses the last Completed backup).
+func (r Run) Deletable() bool { return r.Source == "cloud" && deletablePhases[r.Phase] }

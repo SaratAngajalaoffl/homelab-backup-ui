@@ -24,6 +24,11 @@ type DispatchConfig struct {
 	KopiaImage  string // image with the kopia CLI, for restoring Velero fs-backups
 	CredSecret  string // Secret (in the Velero namespace) holding the BSL's AWS credential
 	RepoSecret  string // Secret holding Velero's Kopia repository password (optional)
+
+	// S3 usage scan.
+	SelfImage       string        // this app's image, run as the scan Job
+	UsageInterval   time.Duration // rescan this often; 0 turns the scan off
+	UsageScanPrefix string        // bucket prefix to size; "" = the default BSL's top-level folder
 }
 
 // runDispatcher polls request ConfigMaps and turns valid ones into a Velero
@@ -77,11 +82,12 @@ func dispatchOnce(ctx context.Context, k *kubeClient, dc DispatchConfig) error {
 	return nil
 }
 
-// dispatchAll is one poll: backup requests, then restore actions and progress.
+// dispatchAll is one poll: backup and delete requests, restore actions and
+// progress, then the S3 usage scan.
 // Each part runs even if an earlier one failed.
 func dispatchAll(ctx context.Context, k *kubeClient, dc DispatchConfig) error {
 	var errs []string
-	for _, step := range []func(context.Context, *kubeClient, DispatchConfig) error{dispatchOnce, processRestoreActions, reconcileRestores} {
+	for _, step := range []func(context.Context, *kubeClient, DispatchConfig) error{dispatchOnce, processDeletes, processRestoreActions, reconcileRestores, reconcileUsage} {
 		if err := step(ctx, k, dc); err != nil {
 			errs = append(errs, err.Error())
 		}
